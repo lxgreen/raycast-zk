@@ -125,11 +125,11 @@ function extractJson(output: string): string {
 }
 
 /**
- * List all ZK notes
+ * List all ZK notes (sorted by modification date, most recent first)
  */
 export async function listNotes(): Promise<ZKNote[]> {
   try {
-    const output = await execZk(["list", "--format", "json"]);
+    const output = await execZk(["list", "--format", "json", "--sort", "modified"]);
     const jsonOutput = extractJson(output);
     const notes = JSON.parse(jsonOutput);
 
@@ -165,7 +165,7 @@ export async function listNotes(): Promise<ZKNote[]> {
 
     // Fallback: try without JSON format
     try {
-      const output = await execZk(["list"]);
+      const output = await execZk(["list", "--sort", "modified"]);
       const lines = output.split("\n").filter((line) => {
         const trimmed = line.trim();
         return trimmed && !trimmed.match(/^Found \d+ notes?$/i);
@@ -235,8 +235,141 @@ export async function searchByTag(tag: string): Promise<ZKNote[]> {
 }
 
 /**
+ * Search ZK notes by date
+ */
+export async function searchByDate(dateQuery: string): Promise<ZKNote[]> {
+  const args = ["list", "--format", "json", "--no-input", "--quiet"];
+
+  // Parse date patterns
+  const lowerQuery = dateQuery.toLowerCase();
+
+  if (lowerQuery === "today") {
+    args.push("--created", "today");
+  } else if (lowerQuery === "yesterday") {
+    args.push("--created", "yesterday");
+  } else if (lowerQuery === "week" || lowerQuery === "this week") {
+    args.push("--created-after", "last monday");
+  } else if (lowerQuery === "month" || lowerQuery === "this month") {
+    args.push("--created-after", "last month");
+  } else if (lowerQuery === "recent" || lowerQuery === "modified") {
+    args.push("--sort", "modified");
+  } else if (lowerQuery.startsWith("created:")) {
+    // Allow custom date: @created:yesterday, @created:last tuesday
+    args.push("--created", dateQuery.slice(8).trim());
+  } else if (lowerQuery.startsWith("modified:")) {
+    // Allow custom date: @modified:yesterday
+    args.push("--modified", dateQuery.slice(9).trim());
+  } else if (lowerQuery.startsWith("after:")) {
+    args.push("--created-after", dateQuery.slice(6).trim());
+  } else if (lowerQuery.startsWith("before:")) {
+    args.push("--created-before", dateQuery.slice(7).trim());
+  } else {
+    // Try to use as a direct date
+    args.push("--created", dateQuery);
+  }
+
+  try {
+    const output = await execZk(args);
+    const jsonOutput = extractJson(output);
+    const notes = JSON.parse(jsonOutput);
+
+    if (!Array.isArray(notes)) {
+      throw new Error("Expected array of notes");
+    }
+
+    return notes.map((note: any) => ({
+      id: note.id || note.path || "",
+      title: note.title || note.path?.split("/").pop()?.replace(/\.md$/, "") || "Untitled",
+      path: note.path || note.id || "",
+    }));
+  } catch (error: any) {
+    const errorMessage = error.message || String(error);
+    const errorLower = errorMessage.toLowerCase();
+
+    if (errorLower.includes("found") && errorLower.includes("notes")) {
+      try {
+        const jsonOutput = extractJson(errorMessage);
+        const notes = JSON.parse(jsonOutput);
+        if (Array.isArray(notes)) {
+          return notes.map((note: any) => ({
+            id: note.id || note.path || "",
+            title: note.title || note.path?.split("/").pop()?.replace(/\.md$/, "") || "Untitled",
+            path: note.path || note.id || "",
+          }));
+        }
+      } catch {
+        // Continue to return empty
+      }
+    }
+
+    // Return empty array for date searches that fail
+    return [];
+  }
+}
+
+/**
+ * Search ZK notes by links
+ * - >note: notes linked by the given note (outgoing links)
+ * - <note: notes linking to the given note (backlinks)
+ * - ~note: notes related to the given note
+ * - !orphan: orphan notes (no backlinks)
+ */
+export async function searchByLinks(linkQuery: string, mode: "linked-by" | "link-to" | "related" | "orphan"): Promise<ZKNote[]> {
+  const args = ["list", "--format", "json", "--no-input", "--quiet", "--sort", "modified"];
+
+  if (mode === "orphan") {
+    args.push("--orphan");
+  } else {
+    args.push(`--${mode}`, linkQuery);
+  }
+
+  try {
+    const output = await execZk(args);
+    const jsonOutput = extractJson(output);
+    const notes = JSON.parse(jsonOutput);
+
+    if (!Array.isArray(notes)) {
+      throw new Error("Expected array of notes");
+    }
+
+    return notes.map((note: any) => ({
+      id: note.id || note.path || "",
+      title: note.title || note.path?.split("/").pop()?.replace(/\.md$/, "") || "Untitled",
+      path: note.path || note.id || "",
+    }));
+  } catch (error: any) {
+    const errorMessage = error.message || String(error);
+    const errorLower = errorMessage.toLowerCase();
+
+    if (errorLower.includes("found") && errorLower.includes("notes")) {
+      try {
+        const jsonOutput = extractJson(errorMessage);
+        const notes = JSON.parse(jsonOutput);
+        if (Array.isArray(notes)) {
+          return notes.map((note: any) => ({
+            id: note.id || note.path || "",
+            title: note.title || note.path?.split("/").pop()?.replace(/\.md$/, "") || "Untitled",
+            path: note.path || note.id || "",
+          }));
+        }
+      } catch {
+        // Continue to return empty
+      }
+    }
+
+    return [];
+  }
+}
+
+/**
  * Search ZK notes using zk's built-in search
- * If query starts with #, search by tag instead
+ * Supports special prefixes:
+ * - #tag: search by tag
+ * - @date: search by date (today, yesterday, week, month, recent)
+ * - >note: notes linked by note (outgoing)
+ * - <note: backlinks to note
+ * - ~note: related notes
+ * - !orphan: orphan notes
  */
 export async function searchNotes(query: string): Promise<ZKNote[]> {
   // Check if query is a tag search
@@ -248,8 +381,50 @@ export async function searchNotes(query: string): Promise<ZKNote[]> {
     return listNotes();
   }
 
+  // Check if query is a date search
+  if (query.startsWith("@")) {
+    const dateQuery = query.slice(1).trim();
+    if (dateQuery) {
+      return searchByDate(dateQuery);
+    }
+    return listNotes();
+  }
+
+  // Check if query is a link search
+  if (query.startsWith(">")) {
+    const noteRef = query.slice(1).trim();
+    if (noteRef) {
+      return searchByLinks(noteRef, "linked-by");
+    }
+    return listNotes();
+  }
+
+  if (query.startsWith("<")) {
+    const noteRef = query.slice(1).trim();
+    if (noteRef) {
+      return searchByLinks(noteRef, "link-to");
+    }
+    return listNotes();
+  }
+
+  if (query.startsWith("~")) {
+    const noteRef = query.slice(1).trim();
+    if (noteRef) {
+      return searchByLinks(noteRef, "related");
+    }
+    return listNotes();
+  }
+
+  if (query.startsWith("!")) {
+    const cmd = query.slice(1).trim().toLowerCase();
+    if (cmd === "orphan" || cmd === "orphans") {
+      return searchByLinks("", "orphan");
+    }
+    // Fall through to regular search if not a recognized command
+  }
+
   try {
-    const args = ["list", "--format", "json", "--no-input", "--quiet", "--match", query];
+    const args = ["list", "--format", "json", "--no-input", "--quiet", "--sort", "modified", "--match", query];
     const output = await execZk(args);
     const jsonOutput = extractJson(output);
     const notes = JSON.parse(jsonOutput);

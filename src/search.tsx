@@ -58,7 +58,7 @@ export default function SearchNotes() {
   return (
     <List
       isLoading={isLoading}
-      searchBarPlaceholder="Search notes or #tag..."
+      searchBarPlaceholder="Search, #tag, @today, >links, <backlinks, !orphan..."
       onSearchTextChange={setSearchText}
       throttle
       filtering={false}
