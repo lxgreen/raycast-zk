@@ -1,6 +1,7 @@
 import { exec } from "child_process";
 import { promisify } from "util";
-import { join } from "path";
+import { join, dirname } from "path";
+import { rename } from "fs/promises";
 
 const execAsync = promisify(exec);
 
@@ -18,23 +19,20 @@ export interface ZKNote {
  * Execute zk command with proper environment setup
  */
 async function execZk(args: string[]): Promise<string> {
-  const fullEnv = {
+  const env = {
     ...process.env,
     ZK_NOTEBOOK_DIR,
     EDITOR: "/usr/bin/true",
     VISUAL: "/usr/bin/true",
   };
 
-  const envString = Object.entries(fullEnv)
-    .map(([key, value]) => `${key}="${String(value)}"`)
-    .join(" ");
-
-  const command = `${envString} ${ZK_BIN} ${args.map((arg) => `"${arg.replace(/"/g, '\\"')}"`).join(" ")}`;
+  const command = `${ZK_BIN} ${args.map((arg) => `"${arg.replace(/"/g, '\\"')}"`).join(" ")}`;
 
   try {
     const { stdout, stderr } = await execAsync(command, {
       shell: "/bin/bash",
       maxBuffer: 10 * 1024 * 1024, // 10MB
+      env,
     });
 
     // zk may output informational messages to stderr (like "Found X notes")
@@ -534,4 +532,75 @@ export async function getNoteContent(notePath: string): Promise<string> {
   } catch (error: any) {
     return `Error reading note: ${error.message}`;
   }
+}
+
+/**
+ * Convert title to dash-case filename
+ * e.g., "Raycast Extensions" -> "raycast-extensions.md"
+ */
+function toDashCase(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/_/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+export interface CreateNoteOptions {
+  title: string;
+  tags?: string;
+}
+
+export interface CreateNoteResult {
+  path: string;
+}
+
+/**
+ * Create a new ZK note in the Inbox folder
+ */
+export async function createNote(options: CreateNoteOptions): Promise<CreateNoteResult> {
+  const { title, tags } = options;
+  
+  if (!title.trim()) {
+    throw new Error("Title is required");
+  }
+
+  const filename = `${toDashCase(title)}.md`;
+  const inboxDir = join(ZK_NOTEBOOK_DIR, "Inbox");
+
+  const args = [
+    "new",
+    "--no-input",
+    "-p",  // --print-path short form
+    "-g", "inbox",
+    "-W", inboxDir,
+    "-t", title,
+  ];
+
+  // Tags are passed via --extra (not --tag which doesn't exist in this version)
+  if (tags && tags.trim()) {
+    args.push("--extra", `tags=${tags.trim()}`);
+  }
+
+  const output = await execZk(args);
+  
+  // Get the last non-empty line (the path) - zk outputs warnings before the path
+  const lines = output.trim().split("\n").filter(line => line.trim() && !line.startsWith("zk: warning:"));
+  const createdPath = lines.pop() || "";
+  
+  if (!createdPath || !createdPath.includes("/")) {
+    throw new Error("Could not parse created note path from output");
+  }
+
+  // Rename to dash-case filename
+  const noteDir = dirname(createdPath);
+  const newPath = join(noteDir, filename);
+  
+  if (createdPath !== newPath) {
+    await rename(createdPath, newPath);
+  }
+
+  return { path: newPath };
 }

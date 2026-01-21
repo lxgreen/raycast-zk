@@ -16,6 +16,13 @@
       "description": "Fuzzy search through your ZK notes",
       "mode": "view",
       "icon": "icon.png"
+    },
+    {
+      "name": "new-note",
+      "title": "New ZK Note",
+      "description": "Create a new ZK note in the Inbox",
+      "mode": "view",
+      "icon": "icon.png"
     }
   ],
   "dependencies": {
